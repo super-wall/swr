@@ -4,16 +4,22 @@ import fetch from '../libs/fetch'
 import useSWR from 'swr'
 
 export default () => {
-  const { data } = useSWR('/api/data', fetch)
+  const { data } = useSWR('/api/data', fetch, { revalidateOnMount: false })
 
-  return <div style={{ textAlign: 'center' }}>
-    <h1>Trending Projects</h1>
-    <div>
-    {
-      data ? data.map(project => 
-        <p key={project}><Link href='/[user]/[repo]' as={`/${project}`}><a>{project}</a></Link></p>
-      ) : 'loading...'
-    }
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <h1>Trending Projects</h1>
+      <div>
+        {data
+          ? data.map(project => (
+              <p key={project}>
+                <Link href="/[user]/[repo]" as={`/${project}`}>
+                  <a>{project}</a>
+                </Link>
+              </p>
+            ))
+          : 'loading...'}
+      </div>
     </div>
-  </div>
+  )
 }

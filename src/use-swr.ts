@@ -195,6 +195,7 @@ function useSWR<Data = any, Error = any>(
 function useSWR<Data = any, Error = any>(
   ...args
 ): responseInterface<Data, Error> {
+  // 根据传参不同，规范化url，请求函数，config
   let _key: keyInterface,
     fn: fetcherFn<Data> | undefined,
     config: ConfigInterface<Data, Error> = {}
@@ -212,12 +213,11 @@ function useSWR<Data = any, Error = any>(
     }
   }
 
-  // we assume `key` as the identifier of the request
-  // `key` can change but `fn` shouldn't
-  // (because `revalidate` only depends on `key`)
-  // `keyErr` is the cache key for error objects
+  // 我们假设key是请求的标识符，key是可以改变的，但请求fn不应该改变，
+  // 因为revalidate函数以依赖于key，keyErr是错误对象的缓存key
   const [key, fnArgs, keyErr] = cache.serializeKey(_key)
 
+  // 合并配置，优先级：hook调用传入的config > 全局配置 > 默认配置
   config = Object.assign(
     {},
     defaultConfig,
@@ -225,22 +225,25 @@ function useSWR<Data = any, Error = any>(
     config
   )
 
+  console.log(config)
+
   const configRef = useRef(config)
   useIsomorphicLayoutEffect(() => {
     configRef.current = config
   })
 
+  // 如果没传如请求函数，使用配置中fetcher
   if (typeof fn === 'undefined') {
-    // use the global fetcher
     fn = config.fetcher
   }
 
+  // 初始值（可能为空），先通过请求标识符尝试取缓存，不存在使用配置中的初始值
   const initialData = cache.get(key) || config.initialData
+  // 初始错误，通过错误标识符取缓存
   const initialError = cache.get(keyErr)
 
-  // if a state is accessed (data, error or isValidating),
-  // we add the state to dependencies so if the state is
-  // updated in the future, we can trigger a rerender
+  // 如果state中属性(data, error, isValidating)被访问(使用Object.defineProperties的get进行拦截)
+  // 我们将对应属性变为true代表存在依赖关系，以至于执行dispatch函数(L265行)时，我们可以触发渲染
   const stateDependencies = useRef({
     data: false,
     error: false,
@@ -252,10 +255,12 @@ function useSWR<Data = any, Error = any>(
     isValidating: false
   })
 
-  // display the data label in the React DevTools next to SWR hooks
+  // React DevTools debugger 显示state的data
   useDebugValue(stateRef.current.data)
 
+  // 用于强制渲染
   const rerender = useState(null)[1]
+  // 类似于redux的dispatch 用于更新state(data, error, isValidating)
   let dispatch = useCallback(payload => {
     let shouldUpdateState = false
     for (let k in payload) {
@@ -264,17 +269,21 @@ function useSWR<Data = any, Error = any>(
         shouldUpdateState = true
       }
     }
+    // 如果改变的属性存在依赖关系 或者是 suspense模式
     if (shouldUpdateState || config.suspense) {
+      // 组件已卸载
       if (unmountedRef.current) return
+      // 强制渲染
       rerender({})
     }
   }, [])
 
-  // error ref inside revalidate (is last request errored?)
+  // 组件卸载标志位
   const unmountedRef = useRef(false)
+  // 最新的请求标识符key
   const keyRef = useRef(key)
 
-  // do unmount check for callbacks
+  // 触发事件，组件未卸载时，会执行config上的回调方法
   const eventsRef = useRef({
     emit: (event, ...params) => {
       if (unmountedRef.current) return
@@ -289,6 +298,7 @@ function useSWR<Data = any, Error = any>(
     [key]
   )
 
+  // 添加重新取数的回调
   const addRevalidator = (revalidators, callback) => {
     if (!callback) return
     if (!revalidators[key]) {
@@ -298,25 +308,28 @@ function useSWR<Data = any, Error = any>(
     }
   }
 
+  // 移除重新取数的回调
   const removeRevalidator = (revlidators, callback) => {
     if (revlidators[key]) {
       const revalidators = revlidators[key]
       const index = revalidators.indexOf(callback)
       if (index >= 0) {
-        // 10x faster than splice
         // https://jsperf.com/array-remove-by-index
+        // 将最后一个回调移至待删除位置，然后删除最后一位，比splice要快速
         revalidators[index] = revalidators[revalidators.length - 1]
         revalidators.pop()
       }
     }
   }
 
-  // start a revalidation
+  // 重新取数，返回布尔值Promise
   const revalidate = useCallback(
     async (
       revalidateOpts: RevalidateOptionInterface = {}
     ): Promise<boolean> => {
+      // 请求标识符或请求函数不存在直接返回false
       if (!key || !fn) return false
+      // 组件已卸载返回false
       if (unmountedRef.current) return false
       revalidateOpts = Object.assign({ dedupe: false }, revalidateOpts)
 
@@ -467,42 +480,42 @@ function useSWR<Data = any, Error = any>(
     [key]
   )
 
-  // mounted (client side rendering)
+  // 组件挂载
   useIsomorphicLayoutEffect(() => {
     if (!key) return undefined
 
-    // after `key` updates, we need to mark it as mounted
+    // 请求标识符key有值后，需要标记为组建已挂载
     unmountedRef.current = false
 
-    // after the component is mounted (hydrated),
-    // we need to update the data from the cache
-    // and trigger a revalidation
-
+    // 组件挂载后，我们需要更新从缓存更新数据，并且触发重新取数
     const currentHookData = stateRef.current.data
     const latestKeyedData = cache.get(key) || config.initialData
 
-    // update the state if the key changed (not the inital render) or cache updated
+    // 如果请求标识符key改变 或者 缓存和当前值不相同时
     if (
       keyRef.current !== key ||
       !config.compare(currentHookData, latestKeyedData)
     ) {
+      // dispatch改变state.current.data，触发渲染(也可能不触发)
       dispatch({ data: latestKeyedData })
+      // 更新key
       keyRef.current = key
     }
 
-    // revalidate with deduping
+    // 会清除重复数据的重新取数
     const softRevalidate = () => revalidate({ dedupe: true })
 
-    // trigger a revalidation
+    // 触发重新取数，选项挂载请求为true 或者 没设置“初始值”和“挂载请求”
+    // 如果显式的设置了“挂载请求”为false，初始值没有也不会触发
     if (
       config.revalidateOnMount ||
       (!config.initialData && config.revalidateOnMount === undefined)
     ) {
       if (typeof latestKeyedData !== 'undefined') {
-        // delay revalidate if there's cache
-        // to not block the rendering
+        // 优化：如果有缓存数据，利用requestIdleCallback API 在浏览器空闲时间重新取数，以免破坏渲染
         rIC(softRevalidate)
       } else {
+        // 没有缓存数据，就必须直接取数
         softRevalidate()
       }
     }
