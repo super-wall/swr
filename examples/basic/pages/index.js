@@ -4,11 +4,12 @@ import fetch from '../libs/fetch'
 import useSWR from 'swr'
 
 export default () => {
-  const { data } = useSWR('/api/data', fetch, { revalidateOnMount: false })
+  const { data, error, isValidating } = useSWR('/api/data', fetch)
 
   return (
     <div style={{ textAlign: 'center' }}>
       <h1>Trending Projects</h1>
+      <input />
       <div>
         {data
           ? data.map(project => (

@@ -26,45 +26,47 @@ import {
   updaterInterface
 } from './types'
 
+// 判断是否是服务端，用window对象代表是客户端
 const IS_SERVER = typeof window === 'undefined'
 
-// polyfill for requestIdleCallback
+// 不支持requestIdleCallback，用setTimeout模拟
 const rIC = IS_SERVER
   ? null
   : window['requestIdleCallback'] || (f => setTimeout(f, 1))
 
-// React currently throws a warning when using useLayoutEffect on the server.
-// To get around it, we can conditionally useEffect on the server (no-op) and
-// useLayoutEffect in the browser.
+// 考虑到SSR, 浏览器客户端使用useLayoutEffect，服务端使用useEffect
 const useIsomorphicLayoutEffect = IS_SERVER ? useEffect : useLayoutEffect
 
-// global state managers
+// 全局状态管理
 const CONCURRENT_PROMISES = {}
 const CONCURRENT_PROMISES_TS = {}
-const FOCUS_REVALIDATORS = {}
-const RECONNECT_REVALIDATORS = {}
+const FOCUS_REVALIDATORS = {} // 页面可见性取数回调
+const RECONNECT_REVALIDATORS = {} // 浏览器可访问网络取数回调
 const CACHE_REVALIDATORS = {}
 const MUTATION_TS = {}
 const MUTATION_END_TS = {}
 
-// setup DOM events listeners for `focus` and `reconnect` actions
+// 浏览器客户端环境，需要监听一些事件，来实现重新取数
 if (!IS_SERVER && window.addEventListener) {
+  // 对指定对象重新取数
   const revalidate = revalidators => {
     if (!isDocumentVisible() || !isOnline()) return
 
+    // 遍历所有请求标识符的回调数组中第一个。为什么第一个?
     for (const key in revalidators) {
       if (revalidators[key][0]) revalidators[key][0]()
     }
   }
 
-  // focus revalidate
+  // 页面可见性(visibilitychange、focus)时，重新取数
+  // focus、visibilitychange可能会同时触发，所以onFocus(527行)做了节流操作
   window.addEventListener(
     'visibilitychange',
     () => revalidate(FOCUS_REVALIDATORS),
     false
   )
   window.addEventListener('focus', () => revalidate(FOCUS_REVALIDATORS), false)
-  // reconnect revalidate
+  // 当浏览器能够访问网络, 重新取数
   window.addEventListener(
     'online',
     () => revalidate(RECONNECT_REVALIDATORS),
@@ -333,11 +335,13 @@ function useSWR<Data = any, Error = any>(
       if (unmountedRef.current) return false
       revalidateOpts = Object.assign({ dedupe: false }, revalidateOpts)
 
+      // loading状态
       let loading = true
+      // 是否可以使用重复请求。相同的请求未过期时(config.dedupingInterval间隔会清除一次)，并且开启了去重
       let shouldDeduping =
         typeof CONCURRENT_PROMISES[key] !== 'undefined' && revalidateOpts.dedupe
 
-      // start fetching
+      // 开始异步请求
       try {
         dispatch({
           isValidating: true
@@ -346,48 +350,47 @@ function useSWR<Data = any, Error = any>(
         let newData
         let startAt
 
+        // 已经有一个正在进行的请求，需要去重，直接使用之前的就可以。
         if (shouldDeduping) {
-          // there's already an ongoing request,
-          // this one needs to be deduplicated.
           startAt = CONCURRENT_PROMISES_TS[key]
           newData = await CONCURRENT_PROMISES[key]
         } else {
-          // if no cache being rendered currently (it shows a blank page),
-          // we trigger the loading slow event.
+          // 如果没有缓存，说明页面时空白状态，超时后触发网速慢的回调事件，默认是空函数
           if (config.loadingTimeout && !cache.get(key)) {
             setTimeout(() => {
               if (loading) eventsRef.current.emit('onLoadingSlow', key, config)
             }, config.loadingTimeout)
           }
 
+          // useSWR传入数组，fnArgs是该数组，当做参数执行请求函数
           if (fnArgs !== null) {
             CONCURRENT_PROMISES[key] = fn(...fnArgs)
           } else {
+            // 否则将请求标识符key当做参数传入，基本上是请求url
             CONCURRENT_PROMISES[key] = fn(key)
           }
 
+          // 此次请求的时间戳
           CONCURRENT_PROMISES_TS[key] = startAt = Date.now()
 
+          // 将请求结果赋值给newData
           newData = await CONCURRENT_PROMISES[key]
 
+          // dedupingInterval时间后，删除此次请求，这段时间内，如果开启了dedupe，都可以直接用
           setTimeout(() => {
             delete CONCURRENT_PROMISES[key]
             delete CONCURRENT_PROMISES_TS[key]
           }, config.dedupingInterval)
 
-          // trigger the success event,
-          // only do this for the original request.
+          // 触发成功事件
           eventsRef.current.emit('onSuccess', newData, key, config)
         }
 
         const shouldIgnoreRequest =
-          // if there're other ongoing request(s), started after the current one,
-          // we need to ignore the current one to avoid possible race conditions:
-          //   req1------------------>res1        (current one)
-          //        req2---------------->res2
-          // the request that fired later will always be kept.
+          // 如果有其他正在进行的请求发生在此请求之后，我们需要忽略当前请求，以后面的为准
           CONCURRENT_PROMISES_TS[key] > startAt ||
-          // if there're other mutations(s), overlapped with the current revalidation:
+          // 如果有其他突变，要忽略当前请求，因为它不是最新的了。
+          // 同时突变结束后，一个新的取数应该被触发
           // case 1:
           //   req------------------>res
           //       mutate------>end
@@ -397,8 +400,6 @@ function useSWR<Data = any, Error = any>(
           // case 3:
           //   req------------------>res
           //       mutate-------...---------->
-          // we have to ignore the revalidation result (res) because it's no longer fresh.
-          // meanwhile, a new revalidation should be triggered when the mutation ends.
           (MUTATION_TS[key] &&
             // case 1
             (startAt <= MUTATION_TS[key] ||
@@ -415,22 +416,21 @@ function useSWR<Data = any, Error = any>(
         cache.set(key, newData)
         cache.set(keyErr, undefined)
 
-        // new state for the reducer
+        // 为dispatch函数创建新的state
         const newState: actionType<Data, Error> = {
           isValidating: false
         }
 
+        // 此次请求没有发生错误，如果之前是错误，需要修改
         if (typeof stateRef.current.error !== 'undefined') {
-          // we don't have an error
           newState.error = undefined
         }
+        // 请求结果不相等时(深度比较)，更新
         if (!config.compare(stateRef.current.data, newData)) {
-          // deep compare to avoid extra re-render
-          // data changed
           newState.data = newData
         }
 
-        // merge the new state
+        // 更新state，触发渲染。
         dispatch(newState)
 
         if (!shouldDeduping) {
@@ -438,13 +438,14 @@ function useSWR<Data = any, Error = any>(
           broadcastState(key, newData, undefined)
         }
       } catch (err) {
+        // 捕获错误， 删除此次请求的promise
         delete CONCURRENT_PROMISES[key]
         delete CONCURRENT_PROMISES_TS[key]
 
+        // 缓存：设置错误
         cache.set(keyErr, err)
 
-        // get a new error
-        // don't use deep equal for errors
+        // 发生错误不同，更新state
         if (stateRef.current.error !== err) {
           // we keep the stale data
           dispatch({
@@ -458,10 +459,11 @@ function useSWR<Data = any, Error = any>(
           }
         }
 
-        // events and retry
+        // 触发onError事件回调
         eventsRef.current.emit('onError', err, key, config)
+        // 发生错误后是否进行重试
         if (config.shouldRetryOnError) {
-          // when retrying, we always enable deduping
+          // 当重试时，需要启动清除重复，一直维护重试次数
           const retryCount = (revalidateOpts.retryCount || 0) + 1
           eventsRef.current.emit(
             'onErrorRetry',
@@ -484,7 +486,7 @@ function useSWR<Data = any, Error = any>(
   useIsomorphicLayoutEffect(() => {
     if (!key) return undefined
 
-    // 请求标识符key有值后，需要标记为组建已挂载
+    // 请求标识符key有值后，需要标记为组件已挂载
     unmountedRef.current = false
 
     // 组件挂载后，我们需要更新从缓存更新数据，并且触发重新取数
@@ -512,7 +514,7 @@ function useSWR<Data = any, Error = any>(
       (!config.initialData && config.revalidateOnMount === undefined)
     ) {
       if (typeof latestKeyedData !== 'undefined') {
-        // 优化：如果有缓存数据，利用requestIdleCallback API 在浏览器空闲时间重新取数，以免破坏渲染
+        // 优化：如果有缓存数据，利用requestIdleCallback API 在浏览器空闲时间重新取数，以免阻止渲染
         rIC(softRevalidate)
       } else {
         // 没有缓存数据，就必须直接取数
@@ -520,6 +522,7 @@ function useSWR<Data = any, Error = any>(
       }
     }
 
+    // 页面可见时回调，因为focus、visibilitychange可能会同时触发，所以做了节流操作
     let pending = false
     const onFocus = () => {
       if (pending || !configRef.current.revalidateOnFocus) return
@@ -531,13 +534,14 @@ function useSWR<Data = any, Error = any>(
       )
     }
 
+    // 浏览器可访问网络时回调
     const onReconnect = () => {
       if (configRef.current.revalidateOnReconnect) {
         softRevalidate()
       }
     }
 
-    // register global cache update listener
+    // 缓存更新监听函数
     const onUpdate: updaterInterface<Data, Error> = (
       shouldRevalidate = true,
       updatedData,
@@ -687,11 +691,9 @@ function useSWR<Data = any, Error = any>(
       Data,
       Error
     >
+    // 请求标识符key可能发生变化，所以key不相等时，返回初始的值
     Object.defineProperties(state, {
       error: {
-        // `key` might be changed in the upcoming hook re-render,
-        // but the previous state will stay
-        // so we need to match the latest key and data (fallback to `initialData`)
         get: function() {
           stateDependencies.current.error = true
           return keyRef.current === key ? stateRef.current.error : initialError
