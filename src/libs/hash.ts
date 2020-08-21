@@ -7,12 +7,13 @@ const table = new WeakMap()
 // counter of the key
 let counter = 0
 
-// hashes an array of objects and returns a string
+// 根据数组，生成一个字符串
 export default function hash(args: any[]): string {
   if (!args.length) return ''
   let key = 'arg'
   for (let i = 0; i < args.length; ++i) {
     let _hash
+    // 基本类型都转变成字符串
     if (args[i] === null || typeof args[i] !== 'object') {
       // need to consider the case that args[i] is a string:
       // args[i]        _hash
@@ -27,6 +28,7 @@ export default function hash(args: any[]): string {
         _hash = String(args[i])
       }
     } else {
+      // weakMap中是否存在引用类型，拼接出现的顺序
       if (!table.has(args[i])) {
         _hash = counter
         table.set(args[i], counter++)

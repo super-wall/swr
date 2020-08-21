@@ -48,16 +48,16 @@ const slowConnection =
 // 默认配置
 const defaultConfig: ConfigInterface = {
   // 事件回调
-  onLoadingSlow: () => {},
-  onSuccess: () => {},
-  onError: () => {},
-  onErrorRetry,
+  onLoadingSlow: () => {}, // 超时
+  onSuccess: () => {}, // 成功
+  onError: () => {}, // 发生错误
+  onErrorRetry, // 发生错误重试
 
   // 错误重试间隔
   errorRetryInterval: (slowConnection ? 10 : 5) * 1000,
   // 页面可见时请求节流间隔
   focusThrottleInterval: 5 * 1000,
-  // 清除重复数据的间隔
+  // 重复数据存在的间隔，
   dedupingInterval: 2 * 1000,
   // 请求超时时间
   loadingTimeout: (slowConnection ? 5 : 3) * 1000,

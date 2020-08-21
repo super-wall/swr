@@ -97,15 +97,18 @@ const trigger: triggerInterface = (_key, shouldRevalidate = true) => {
   return Promise.resolve(cache.get(key))
 }
 
+// 当一个请求返回最新结果，也要更新其他相同请求标识符key的state
 const broadcastState: broadcastStateInterface = (key, data, error) => {
   const updaters = CACHE_REVALIDATORS[key]
   if (key && updaters) {
     for (let i = 0; i < updaters.length; ++i) {
+      // 执行的是onUpdate函数
       updaters[i](false, data, error)
     }
   }
 }
 
+// 改变缓存数据
 const mutate: mutateInterface = async (
   _key,
   _data,
@@ -122,30 +125,33 @@ const mutate: mutateInterface = async (
   MUTATION_END_TS[key] = 0
 
   // keep track of timestamps before await asynchronously
+  // 在异步等待前跟踪时间戳
   const beforeMutationTs = MUTATION_TS[key]
   const beforeConcurrentPromisesTs = CONCURRENT_PROMISES_TS[key]
 
   let data, error
 
   if (_data && typeof _data === 'function') {
-    // `_data` is a function, call it passing current cache value
+    // 传入是函数，将缓存值交给函数处理
     try {
       data = await _data(cache.get(key))
     } catch (err) {
       error = err
     }
   } else if (_data && typeof _data.then === 'function') {
-    // `_data` is a promise
+    // 传入的是promise，直接await结果
     try {
       data = await _data
     } catch (err) {
       error = err
     }
   } else {
+    // 否则是直接复制m
     data = _data
   }
 
   // check if other mutations have occurred since we've started awaiting, if so then do not persist this change
+  // 突变过程中，发生过其他改变，时间不相等，我们不保留这次变化
   if (
     beforeMutationTs !== MUTATION_TS[key] ||
     beforeConcurrentPromisesTs !== CONCURRENT_PROMISES_TS[key]
@@ -155,16 +161,16 @@ const mutate: mutateInterface = async (
   }
 
   if (typeof data !== 'undefined') {
-    // update cached data, avoid notifying from the cache
+    // 更新缓存值
     cache.set(key, data)
   }
+  // 更新缓存值
   cache.set(keyErr, error)
 
-  // reset the timestamp to mark the mutation has ended
+  // 突变结束后，更新结束时间
   MUTATION_END_TS[key] = Date.now() - 1
 
-  // enter the revalidation stage
-  // update existing SWR Hooks' state
+  // 进入重新取数阶段，更新现有的swr hooks状态
   const updaters = CACHE_REVALIDATORS[key]
   if (updaters) {
     const promises = []
@@ -434,7 +440,7 @@ function useSWR<Data = any, Error = any>(
         dispatch(newState)
 
         if (!shouldDeduping) {
-          // also update other hooks
+          // 同时更新其他钩子函数
           broadcastState(key, newData, undefined)
         }
       } catch (err) {
@@ -454,7 +460,7 @@ function useSWR<Data = any, Error = any>(
           })
 
           if (!shouldDeduping) {
-            // also broadcast to update other hooks
+            // 同时更新其他钩子函数
             broadcastState(key, undefined, err)
           }
         }
@@ -541,7 +547,7 @@ function useSWR<Data = any, Error = any>(
       }
     }
 
-    // 缓存更新监听函数
+    // 更新state的函数，shouldRevalidate代表是否重新取数
     const onUpdate: updaterInterface<Data, Error> = (
       shouldRevalidate = true,
       updatedData,
@@ -629,7 +635,7 @@ function useSWR<Data = any, Error = any>(
     revalidate
   ])
 
-  // suspense
+  // 异步组件
   if (config.suspense) {
     // in suspense mode, we can't return empty state
     // (it should be suspended)

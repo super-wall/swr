@@ -1,3 +1,4 @@
+// 判断是否页面可见
 export default function isDocumentVisible(): boolean {
   if (
     typeof document !== 'undefined' &&
@@ -5,6 +6,6 @@ export default function isDocumentVisible(): boolean {
   ) {
     return document.visibilityState !== 'hidden'
   }
-  // always assume it's visible
+  // 不是客户端，总是假设它是可见的
   return true
 }

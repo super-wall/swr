@@ -32,5 +32,6 @@ yarn dev
 - 当请求存在缓存时，利用`requestIdleCallback`使取数发生在浏览器空闲时间，以免阻止渲染
 - 通过Object.defineProperty对属性get进行拦截，修改是否被依赖的标志位`stateDependencies`。当没被依赖的属性更新时，可以做到不渲染。
 - `navigator.connection.effectiveType`可以查看当前网络状态，网络慢时，适当延长了超时(`loadingTimeout`)时间、错误重试(`errorRetryInterval`)间隔。
-- 
+
+  
 
