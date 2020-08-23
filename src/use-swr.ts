@@ -34,32 +34,41 @@ const rIC = IS_SERVER
   ? null
   : window['requestIdleCallback'] || (f => setTimeout(f, 1))
 
-// 考虑到SSR, 浏览器客户端使用useLayoutEffect，服务端使用useEffect
+// 尽量将请求时机提前，考虑到SSR, 浏览器客户端使用useLayoutEffect，服务端使用useEffect
 const useIsomorphicLayoutEffect = IS_SERVER ? useEffect : useLayoutEffect
 
-// 全局状态管理
+/* 全局状态管理 */
+// 存储请求的promise  key => promise
 const CONCURRENT_PROMISES = {}
+// 存储请求的时间戳    key => timestamp
 const CONCURRENT_PROMISES_TS = {}
-const FOCUS_REVALIDATORS = {} // 页面可见性取数回调
-const RECONNECT_REVALIDATORS = {} // 浏览器可访问网络取数回调
+// 存储页面可见时的回调函数  key => callback
+const FOCUS_REVALIDATORS = {}
+// 浏览器网络重新连接时的回调函数  key => callback
+const RECONNECT_REVALIDATORS = {}
+// 缓存值改变时的回调函数（需要同步其他相同请求的结果值）  key => callback
 const CACHE_REVALIDATORS = {}
+// 触发突变的时间戳（手动改变缓存时触发的时间）key => timestamp
 const MUTATION_TS = {}
+// 触发突变结束的时间戳（手动改变缓存时触发结束的时间）key => timestamp
 const MUTATION_END_TS = {}
 
-// 浏览器客户端环境，需要监听一些事件，来实现重新取数
+// 浏览器客户端环境，需要监听一些事件（页面可见，浏览器重新连接），来实现重新取数
 if (!IS_SERVER && window.addEventListener) {
   // 对指定对象重新取数
   const revalidate = revalidators => {
+    // 页面不可见，无网络情况直接终止
     if (!isDocumentVisible() || !isOnline()) return
 
-    // 遍历所有请求标识符的回调数组中第一个。为什么第一个?
+    // 遍历所有请求标识符的回调数组中第一个
+    // 因为重新取数成功后，会执行同步操作（broadcastState函数），所以只执行一个取数回调函数就可以。
     for (const key in revalidators) {
       if (revalidators[key][0]) revalidators[key][0]()
     }
   }
 
   // 页面可见性(visibilitychange、focus)时，重新取数
-  // focus、visibilitychange可能会同时触发，所以onFocus(527行)做了节流操作
+  // focus、visibilitychange可能会同时触发，所以onFocus(527行)会做节流操作
   window.addEventListener(
     'visibilitychange',
     () => revalidate(FOCUS_REVALIDATORS),
@@ -74,9 +83,9 @@ if (!IS_SERVER && window.addEventListener) {
   )
 }
 
+// 通过key找到缓存值，然后同步数据，返回promise，resolve更新后的值
+// 默认会重新请求，请求可能就会导致结果变，所以返回更新后最新的值
 const trigger: triggerInterface = (_key, shouldRevalidate = true) => {
-  // we are ignoring the second argument which correspond to the arguments
-  // the fetcher will receive when key is an array
   const [key, , keyErr] = cache.serializeKey(_key)
   if (!key) return Promise.resolve()
 
@@ -91,13 +100,14 @@ const trigger: triggerInterface = (_key, shouldRevalidate = true) => {
         updaters[i](shouldRevalidate, currentData, currentError, i > 0)
       )
     }
-    // return new updated value
+    // 返回更新后的值
     return Promise.all(promises).then(() => cache.get(key))
   }
   return Promise.resolve(cache.get(key))
 }
 
 // 当一个请求返回最新结果，也要更新其他相同请求标识符key的state
+// 只做同步数据，不重新请求
 const broadcastState: broadcastStateInterface = (key, data, error) => {
   const updaters = CACHE_REVALIDATORS[key]
   if (key && updaters) {
@@ -108,7 +118,7 @@ const broadcastState: broadcastStateInterface = (key, data, error) => {
   }
 }
 
-// 改变缓存数据
+// 突变，改变缓存数据
 const mutate: mutateInterface = async (
   _key,
   _data,
@@ -117,15 +127,14 @@ const mutate: mutateInterface = async (
   const [key, , keyErr] = cache.serializeKey(_key)
   if (!key) return
 
-  // if there is no new data, call revalidate against the key
+  // 如果没有传要改变的数据，那么直接触发一次重新取数
   if (typeof _data === 'undefined') return trigger(_key, shouldRevalidate)
 
-  // update timestamps
+  // 更新突变的时间戳
   MUTATION_TS[key] = Date.now() - 1
   MUTATION_END_TS[key] = 0
 
-  // keep track of timestamps before await asynchronously
-  // 在异步等待前跟踪时间戳
+  // 在异步等待前跟踪时间戳，保存上次时间戳
   const beforeMutationTs = MUTATION_TS[key]
   const beforeConcurrentPromisesTs = CONCURRENT_PROMISES_TS[key]
 
@@ -150,8 +159,7 @@ const mutate: mutateInterface = async (
     data = _data
   }
 
-  // check if other mutations have occurred since we've started awaiting, if so then do not persist this change
-  // 突变过程中，发生过其他改变，时间不相等，我们不保留这次变化
+  // 突变过程中，发生过其他突变或者取数，时间不相等，我们不保留这次变化
   if (
     beforeMutationTs !== MUTATION_TS[key] ||
     beforeConcurrentPromisesTs !== CONCURRENT_PROMISES_TS[key]
@@ -170,7 +178,7 @@ const mutate: mutateInterface = async (
   // 突变结束后，更新结束时间
   MUTATION_END_TS[key] = Date.now() - 1
 
-  // 进入重新取数阶段，更新现有的swr hooks状态
+  // 进入同步过程，shouldRevalidate为true会重新请求，更新现有的swr hooks状态
   const updaters = CACHE_REVALIDATORS[key]
   if (updaters) {
     const promises = []
@@ -233,8 +241,7 @@ function useSWR<Data = any, Error = any>(
     config
   )
 
-  console.log(config)
-
+  // configRef始终是最新的配置
   const configRef = useRef(config)
   useIsomorphicLayoutEffect(() => {
     configRef.current = config
@@ -273,6 +280,7 @@ function useSWR<Data = any, Error = any>(
     let shouldUpdateState = false
     for (let k in payload) {
       stateRef.current[k] = payload[k]
+      // 如果调用者被依赖（有使用），则应该触发更新
       if (stateDependencies.current[k]) {
         shouldUpdateState = true
       }
@@ -291,14 +299,16 @@ function useSWR<Data = any, Error = any>(
   // 最新的请求标识符key
   const keyRef = useRef(key)
 
-  // 触发事件，组件未卸载时，会执行config上的回调方法
+  // 触发事件，会执行config上的回调方法（onLoadingSlow、onSuccess、onError、onErrorRetry）
   const eventsRef = useRef({
     emit: (event, ...params) => {
+      // 组件未卸载时，不需要触发
       if (unmountedRef.current) return
       configRef.current[event](...params)
     }
   })
 
+  // 突变，改变缓存数据
   const boundMutate: responseInterface<Data, Error>['mutate'] = useCallback(
     (data, shouldRevalidate) => {
       return mutate(key, data, shouldRevalidate)
@@ -306,7 +316,7 @@ function useSWR<Data = any, Error = any>(
     [key]
   )
 
-  // 添加重新取数的回调
+  // 往全局Map上添加重新取数的回调
   const addRevalidator = (revalidators, callback) => {
     if (!callback) return
     if (!revalidators[key]) {
@@ -316,7 +326,7 @@ function useSWR<Data = any, Error = any>(
     }
   }
 
-  // 移除重新取数的回调
+  // 从全局Map上移除重新取数的回调
   const removeRevalidator = (revlidators, callback) => {
     if (revlidators[key]) {
       const revalidators = revlidators[key]
@@ -382,7 +392,7 @@ function useSWR<Data = any, Error = any>(
           // 将请求结果赋值给newData
           newData = await CONCURRENT_PROMISES[key]
 
-          // dedupingInterval时间后，删除此次请求，这段时间内，如果开启了dedupe，都可以直接用
+          // dedupingInterval时间后，从对象上删除此次请求，这段时间内，如果开启了dedupe，都可以直接用
           setTimeout(() => {
             delete CONCURRENT_PROMISES[key]
             delete CONCURRENT_PROMISES_TS[key]
@@ -396,7 +406,7 @@ function useSWR<Data = any, Error = any>(
           // 如果有其他正在进行的请求发生在此请求之后，我们需要忽略当前请求，以后面的为准
           CONCURRENT_PROMISES_TS[key] > startAt ||
           // 如果有其他突变，要忽略当前请求，因为它不是最新的了。
-          // 同时突变结束后，一个新的取数应该被触发
+          // 同时 突变结束后，一个新的取数应该被触发
           // case 1:
           //   req------------------>res
           //       mutate------>end
@@ -453,7 +463,6 @@ function useSWR<Data = any, Error = any>(
 
         // 发生错误不同，更新state
         if (stateRef.current.error !== err) {
-          // we keep the stale data
           dispatch({
             isValidating: false,
             error: err
@@ -488,7 +497,7 @@ function useSWR<Data = any, Error = any>(
     [key]
   )
 
-  // 组件挂载
+  // 组件挂载，会进行请求取数
   useIsomorphicLayoutEffect(() => {
     if (!key) return undefined
 
@@ -510,7 +519,7 @@ function useSWR<Data = any, Error = any>(
       keyRef.current = key
     }
 
-    // 会清除重复数据的重新取数
+    // 会清除重复数据的重新取数，一定间隔内，会保存请求，碰到重复的，直接使用之前的。
     const softRevalidate = () => revalidate({ dedupe: true })
 
     // 触发重新取数，选项挂载请求为true 或者 没设置“初始值”和“挂载请求”
@@ -520,7 +529,7 @@ function useSWR<Data = any, Error = any>(
       (!config.initialData && config.revalidateOnMount === undefined)
     ) {
       if (typeof latestKeyedData !== 'undefined') {
-        // 优化：如果有缓存数据，利用requestIdleCallback API 在浏览器空闲时间重新取数，以免阻止渲染
+        // 优化：如果有缓存数据，利用requestIdleCallback API 在浏览器空闲时间重新取数，以免阻塞渲染
         rIC(softRevalidate)
       } else {
         // 没有缓存数据，就必须直接取数
@@ -547,17 +556,18 @@ function useSWR<Data = any, Error = any>(
       }
     }
 
-    // 更新state的函数，shouldRevalidate代表是否重新取数
+    // 数据有更新的时候回调，shouldRevalidate代表是否重新取数
     const onUpdate: updaterInterface<Data, Error> = (
       shouldRevalidate = true,
       updatedData,
       updatedError,
       dedupe = true
     ) => {
-      // update hook state
+      // 更新state
       const newState: actionType<Data, Error> = {}
       let needUpdate = false
 
+      // 比较不相同时，更新
       if (
         typeof updatedData !== 'undefined' &&
         !config.compare(stateRef.current.data, updatedData)
@@ -566,17 +576,18 @@ function useSWR<Data = any, Error = any>(
         needUpdate = true
       }
 
-      // always update error
-      // because it can be `undefined`
+      // 总是更新错误，因为它可能是undefined
       if (stateRef.current.error !== updatedError) {
         newState.error = updatedError
         needUpdate = true
       }
 
+      // 有变更，触发更新
       if (needUpdate) {
         dispatch(newState)
       }
 
+      // 是否重新取数
       if (shouldRevalidate) {
         if (dedupe) {
           return softRevalidate()
@@ -592,22 +603,25 @@ function useSWR<Data = any, Error = any>(
     addRevalidator(CACHE_REVALIDATORS, onUpdate)
 
     return () => {
-      // cleanup
+      // 清除
       dispatch = () => null
 
-      // mark it as unmounted
+      // 标记为卸载
       unmountedRef.current = true
 
+      // 移除回调函数
       removeRevalidator(FOCUS_REVALIDATORS, onFocus)
       removeRevalidator(RECONNECT_REVALIDATORS, onReconnect)
       removeRevalidator(CACHE_REVALIDATORS, onUpdate)
     }
   }, [key, revalidate])
 
-  // set up polling
+  // 轮询，依赖项：refreshInterval(轮询间隔)、refreshWhenHidden(页面不可见时是否刷新)、refreshWhenOffline(无网络情况是否刷新)
   useIsomorphicLayoutEffect(() => {
     let timer = null
     const tick = async () => {
+      // 默认：发生错误 或者 页面不可见 或者 无网络情况 都不会重新取数
+      // 可以设置 refreshWhenHidden、refreshWhenOffline为true，也会触发取数
       if (
         !stateRef.current.error &&
         (config.refreshWhenHidden || isDocumentVisible()) &&
@@ -618,13 +632,16 @@ function useSWR<Data = any, Error = any>(
         // and let the error retry function handle it
         await revalidate({ dedupe: true })
       }
+      // 继续轮询
       if (config.refreshInterval) {
         timer = setTimeout(tick, config.refreshInterval)
       }
     }
+    // config.refreshInterval默认是0，所以不会轮询。每次轮询都会执行tick函数
     if (config.refreshInterval) {
       timer = setTimeout(tick, config.refreshInterval)
     }
+    // 返回清理函数
     return () => {
       if (timer) clearTimeout(timer)
     }
@@ -635,15 +652,13 @@ function useSWR<Data = any, Error = any>(
     revalidate
   ])
 
-  // 异步组件
+  // 异步组件 suspense模式，我们不能返回空状态，它应该是被暂停等待的
   if (config.suspense) {
-    // in suspense mode, we can't return empty state
-    // (it should be suspended)
-
-    // try to get data and error from cache
+    // 尝试从缓存中取值
     let latestData = cache.get(key)
     let latestError = cache.get(keyErr)
 
+    // 缓存不存在时，使用初始值。
     if (typeof latestData === 'undefined') {
       latestData = initialData
     }
@@ -655,10 +670,8 @@ function useSWR<Data = any, Error = any>(
       typeof latestData === 'undefined' &&
       typeof latestError === 'undefined'
     ) {
-      // need to start the request if it hasn't
+      // 如果还没有发起请求，需要开始进行请求
       if (!CONCURRENT_PROMISES[key]) {
-        // trigger revalidate immediately
-        // to get the promise
         revalidate()
       }
 
@@ -666,21 +679,20 @@ function useSWR<Data = any, Error = any>(
         CONCURRENT_PROMISES[key] &&
         typeof CONCURRENT_PROMISES[key].then === 'function'
       ) {
-        // if it is a promise
+        // 如果是promise，直接抛出promise错误，实现suspense
         throw CONCURRENT_PROMISES[key]
       }
 
-      // it's a value, return it directly (override)
+      // 如果是普通值，直接返回
       latestData = CONCURRENT_PROMISES[key]
     }
 
+    // 在suspense模式下，如果没有内容则抛出错误
     if (typeof latestData === 'undefined' && latestError) {
-      // in suspense mode, throw error if there's no content
       throw latestError
     }
 
-    // return the latest data / error from cache
-    // in case `key` has changed
+    // 从缓存返回最新数据/错误，以防“key”已更改
     return {
       error: latestError,
       data: latestData,
@@ -690,8 +702,8 @@ function useSWR<Data = any, Error = any>(
     }
   }
 
-  // define returned state
-  // can be memorized since the state is a ref
+  // 定义返回值 { revalidate, mutate, error, data, isValidating }
+  // 其中后三个通过设置get、set来维护是否被依赖，如果某值改变时，没有被依赖（调用者没有使用），就不会触发组件更新。
   return useMemo(() => {
     const state = { revalidate, mutate: boundMutate } as responseInterface<
       Data,
